@@ -6,44 +6,68 @@
 
 
 // require all the things!
-const ytdl = require('ytdl-core');
-const ffmpegPath = require('ffmpeg-static');
 const cp = require('child_process');
 const stream = require('stream');
+const ytdl = require("@distube/ytdl-core"); // more active version of ytdl-core
+const ffmpegPath = require('ffmpeg-static');
+
+const passthru = new stream.PassThrough({ highWaterMark: 1024 * 512 });
+const progress = new stream.Readable();
+progress._read = function (size) { return size; }
 
 // default export: the ffmpeg muxer
 const ytmux = (link, options = {}) => {
-    const result = new stream.PassThrough({ highWaterMark: options.highWaterMark || 1024 * 512 });
+  const result = new stream.PassThrough({ highWaterMark: options.highWaterMark || 1024 * 512 });
+
+  // audio+video
+  if (!options.filter) {
     ytdl.getInfo(link, options).then(info => {
-        audioStream = ytdl.downloadFromInfo(info, { ...options, quality: 'highestaudio' });
-        videoStream = ytdl.downloadFromInfo(info, { ...options, quality: 'highestvideo' });
-        // create the ffmpeg process for muxing
-        ffmpegProcess = cp.spawn(ffmpegPath, [
-            // supress non-crucial messages
-            '-loglevel', '8', '-hide_banner',
-            // input audio and video by pipe
-            '-i', 'pipe:3', '-i', 'pipe:4',
-            // map audio and video correspondingly
-            '-map', '0:a', '-map', '1:v',
-            // no need to change the codec
-            '-c', 'copy',
-            // output mp4 and pipe
-            '-f', 'matroska', 'pipe:5'
-        ], {
-            // no popup window for Windows users
-            windowsHide: true,
-            stdio: [
-                // silence stdin/out, forward stderr,
-                'inherit', 'inherit', 'inherit',
-                // and pipe audio, video, output
-                'pipe', 'pipe', 'pipe'
-            ]
+
+      // get audio and video streams
+      const audio = ytdl.downloadFromInfo(info, { ...options, quality: 'highestaudio' });
+      const video = ytdl.downloadFromInfo(info, { ...options, quality: 'highestvideo' })
+        .on('progress', (_, downloaded, total) => {
+          if (downloaded === total) {
+            progress.push(JSON.stringify({ downloaded, total }, null, 2) + '\n');
+            progress.push(null);
+          } else {
+            progress.push(JSON.stringify({ downloaded, total }, null, 2) + '\n');
+          }
         });
-        audioStream.pipe(ffmpegProcess.stdio[3]);
-        videoStream.pipe(ffmpegProcess.stdio[4]);
-        ffmpegProcess.stdio[5].pipe(result);
+
+      // Start the ffmpeg child process
+      const ffmpegProcess = cp.spawn(ffmpegPath, [
+        // supress non-crucial messages
+        '-loglevel', '8', '-hide_banner',
+        // Redirect/Enable progress messages
+        '-progress', 'pipe:3',
+        // input audio and video by pipe
+        '-i', 'pipe:4', '-i', 'pipe:5',
+        // map audio and video correspondingly
+        '-map', '0:a', '-map', '1:v',
+        // no need to change the codec
+        '-c', 'copy',
+        // output mp4 and pipe
+        '-f', 'matroska', 'pipe:6',
+      ], {
+        // no popup window for Windows users
+        windowsHide: true,
+        stdio: [
+          // stdin, stdout, stderr,
+          'inherit', 'inherit', 'inherit',
+          // progress, audio, video, output
+          'pipe', 'pipe', 'pipe', 'pipe'
+        ]
+      });
+
+      progress.pipe(passthru);
+      audio.pipe(ffmpegProcess.stdio[4]);
+      video.pipe(ffmpegProcess.stdio[5]);
+      ffmpegProcess.stdio[6].pipe(result);
     });
-    return result;
+
+    return [result, passthru];
+  }
 };
 
 // export it
